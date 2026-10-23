@@ -40,6 +40,7 @@ REM UI logic with no game or ImGui dependency - unit-tested on its own.
 set UI_LOGIC="%ROOT%\src\ui\command_queue.cpp" "%ROOT%\src\ui\settings.cpp" "%ROOT%\src\ui\actions.cpp" "%ROOT%\src\ui\menu_state.cpp" "%ROOT%\src\ui\history.cpp" "%ROOT%\src\bots_logic.cpp"
 
 if /i "%~1"=="test" goto :test
+if /i "%~1"=="ai" goto :ai
 
 REM /EHa: the structured-exception guards around engine memory need it.
 REM src\imgui: Dear ImGui 1.78 (MIT, LICENSE.txt there) for the in-game overlay and menu - copied from the
@@ -51,6 +52,21 @@ cl /nologo /LD /O2 /MT /EHa /W3 /std:c++17 ^
    /Fo:"%OBJ%\dll\\" ^
    "%ROOT%\src\main.cpp" %UI_LOGIC% "%ROOT%\src\ui\menu.cpp" "%ROOT%\src\ui\style.cpp" ^
    "%ROOT%\src\ui\tab_diagnostics.cpp" "%ROOT%\src\ui\tab_advanced.cpp" "%ROOT%\src\ui\tab_bots.cpp" ^
+   "%ROOT%\src\imgui\imgui.cpp" "%ROOT%\src\imgui\imgui_draw.cpp" "%ROOT%\src\imgui\imgui_widgets.cpp" ^
+   "%ROOT%\src\imgui\imgui_impl_dx11.cpp" "%ROOT%\src\imgui\imgui_impl_win32.cpp" ^
+   /link /DLL ws2_32.lib psapi.lib dbghelp.lib user32.lib d3dcompiler.lib gdi32.lib
+exit /b %errorlevel%
+
+:ai
+REM The AI build: the command port and every command, no F1 menu, no badge, nothing hooked until a command asks.
+if not exist "%OUT%\ai" mkdir "%OUT%\ai"
+if not exist "%OBJ%\ai" mkdir "%OBJ%\ai"
+cl /nologo /LD /O2 /MT /EHa /W3 /std:c++17 ^
+   /DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD /DGAMELINK_NO_MENU ^
+   /I"%ROOT%\src\imgui" /I"%ROOT%\src" ^
+   /Fe:"%OUT%\ai\FrostyGameLink.dll" ^
+   /Fo:"%OBJ%\ai\\" ^
+   "%ROOT%\src\main.cpp" %UI_LOGIC% "%ROOT%\src\ui\menu_none.cpp" ^
    "%ROOT%\src\imgui\imgui.cpp" "%ROOT%\src\imgui\imgui_draw.cpp" "%ROOT%\src\imgui\imgui_widgets.cpp" ^
    "%ROOT%\src\imgui\imgui_impl_dx11.cpp" "%ROOT%\src\imgui\imgui_impl_win32.cpp" ^
    /link /DLL ws2_32.lib psapi.lib dbghelp.lib user32.lib d3dcompiler.lib gdi32.lib

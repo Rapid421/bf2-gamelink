@@ -60,6 +60,12 @@ build.bat test     :: builds and runs the unit tests (bin\ui_tests.exe)
 For now, inject `bin\FrostyGameLink.dll` into `starwarsbattlefrontii.exe` with any DLL injector, at the main menu or
 in a match. A one-click launcher is on the roadmap. Its log is `C:\ProgramData\FrostyGameLink\gamelink.log`.
 
+## AI build
+
+`build.bat ai` builds the same DLL without the menu (command port only) into `bini`. It is published on its own,
+with docs for AI tools, as [bf2-gamelink-ai](https://github.com/Rapid421/bf2-gamelink-ai); `tools/sync_ai_repo.py`
+mirrors it there.
+
 ## Repository layout
 
 | Folder | What is in it |

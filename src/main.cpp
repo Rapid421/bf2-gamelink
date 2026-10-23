@@ -10890,7 +10890,11 @@ static DXGI_FORMAT OverlayViewFormat(DXGI_FORMAT format)
 static void MenuFrameInputs();         // F1 menu: raw input -> ImGui (defined below)
 static void BadgeDraw();               // corner "gamelink - F1" badge
 static void MenuEnsureWindowHook(IDXGISwapChain* swapChain);
+#ifdef GAMELINK_NO_MENU
+static volatile bool g_badgeOn = false;          // the AI build draws nothing unless asked ('overlay on')
+#else
 static volatile bool g_badgeOn = true;
+#endif
 
 static void OverlayFrame(IDXGISwapChain* swapChain)
 {
@@ -11011,6 +11015,7 @@ static void OverlayKeys(IDXGISwapChain* swapChain)
     if (g_overlayWindow == nullptr || GetForegroundWindow() != g_overlayWindow)
         return;
     // F1 - the menu - is always live once the present hook is in; F9/F10 only after 'overlay on'.
+#ifndef GAMELINK_NO_MENU
     const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
     if (f1 && !f1Down)
     {
@@ -11018,6 +11023,7 @@ static void OverlayKeys(IDXGISwapChain* swapChain)
         LogLine("menu: F1 -> %s", g_menu.IsOpen() ? "open" : "closed");
     }
     f1Down = f1;
+#endif
     if (!g_overlayKeysArmed)
         return;
     const bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
@@ -12534,6 +12540,10 @@ static std::string HandleCommand(const std::string& line)
     }
 
     // ui open|close|toggle|status|tab <name>|test-focuslost - the F1 menu, for scripts and tests.
+#ifdef GAMELINK_NO_MENU
+    if (command == "ui")
+        return Menu_Do("", "");
+#endif
     if (command == "ui")
     {
         char sub[32] = {};
@@ -16943,11 +16953,15 @@ static DWORD WINAPI Startup(LPVOID)
     CreateThread(nullptr, 0, CameraDriveThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, SelectionDrawThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LevelHoldThread, nullptr, 0, nullptr);
+#ifndef GAMELINK_NO_MENU
     if (g_size == kExpectedModuleSize)           // the menu's hooks are build-specific
     {
         CreateThread(nullptr, 0, MenuBootThread, nullptr, 0, nullptr);
         CreateThread(nullptr, 0, BigBattlesBootThread, nullptr, 0, nullptr);
     }
+#else
+    LogLine("AI build: no menu - nothing is hooked until a command asks for it");
+#endif
 
     ServerThread(nullptr);
     return 0;
