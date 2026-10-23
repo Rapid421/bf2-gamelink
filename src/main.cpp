@@ -56,6 +56,9 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 #include "gamelink_api.h"         // the in-game UI's interface to the rest of gamelink
+#include "ui/menu_state.h"        // F1 menu open/closed + tab
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "dbghelp.lib")
@@ -8395,6 +8398,62 @@ static void FakeLockInit()
         InitializeCriticalSection(&g_fakeLock);
 }
 
+// ---- F1 menu: input capture ---------------------------------------------------------------------------------
+// While the menu is open the game must see no keyboard/mouse input, and the menu must get it. BFII reads input as
+// raw input, possibly without legacy window messages, so both directions go through the raw-input hooks below:
+// every real record is copied into the menu's queue and then neutralised for the game - key-downs become key-ups
+// (nothing sticks), mouse deltas, wheel and button-downs are cleared (button-ups are kept, so a button held while
+// opening is released). Synthetic records (rawkey/rawclick) are not touched.
+static MenuState g_menu;
+struct UiKey { USHORT vk; USHORT scan; bool down; };
+static CRITICAL_SECTION g_uiInputLock;
+static volatile LONG g_uiInputLockInit = 0;
+static std::vector<UiKey> g_uiKeys;
+static volatile LONG g_uiWheel = 0;
+static volatile LONG g_menuScrubbed = 0;
+static volatile LONG g_inputHooksPatched = 0;      // import slots redirected by InstallInputHooks
+
+static void UiInputLockInit()
+{
+    if (InterlockedCompareExchange(&g_uiInputLockInit, 1, 0) == 0)
+        InitializeCriticalSection(&g_uiInputLock);
+}
+
+static void MenuConsumeRaw(RAWINPUT* ri)
+{
+    if (ri->header.dwType == RIM_TYPEKEYBOARD)
+    {
+        RAWKEYBOARD& k = ri->data.keyboard;
+        const bool down = (k.Flags & RI_KEY_BREAK) == 0;
+        UiInputLockInit();
+        EnterCriticalSection(&g_uiInputLock);
+        if (g_uiKeys.size() < 256)
+            g_uiKeys.push_back({k.VKey, k.MakeCode, down});
+        LeaveCriticalSection(&g_uiInputLock);
+        k.Flags |= RI_KEY_BREAK;
+        if (k.Message == WM_KEYDOWN) k.Message = WM_KEYUP;
+        else if (k.Message == WM_SYSKEYDOWN) k.Message = WM_SYSKEYUP;
+    }
+    else if (ri->header.dwType == RIM_TYPEMOUSE)
+    {
+        RAWMOUSE& m = ri->data.mouse;
+        if ((m.usButtonFlags & RI_MOUSE_WHEEL) != 0)
+            InterlockedAdd(&g_uiWheel, static_cast<SHORT>(m.usButtonData));
+        const USHORT ups = RI_MOUSE_LEFT_BUTTON_UP | RI_MOUSE_RIGHT_BUTTON_UP | RI_MOUSE_MIDDLE_BUTTON_UP |
+                           RI_MOUSE_BUTTON_4_UP | RI_MOUSE_BUTTON_5_UP;
+        m.lLastX = 0;
+        m.lLastY = 0;
+        m.usButtonFlags &= ups;
+        m.usButtonData = 0;
+    }
+    InterlockedIncrement(&g_menuScrubbed);
+}
+
+static bool MenuIsOpen()
+{
+    return g_menu.IsOpen();
+}
+
 static UINT WINAPI HookGetRawInputData(HRAWINPUT h, UINT command, LPVOID data, PUINT size, UINT headerSize)
 {
     InterlockedIncrement(&g_rawDataCalls);
@@ -8420,7 +8479,11 @@ static UINT WINAPI HookGetRawInputData(HRAWINPUT h, UINT command, LPVOID data, P
         }
         return want;
     }
-    return g_realGetRawInputData(h, command, data, size, headerSize);
+    const UINT got = g_realGetRawInputData(h, command, data, size, headerSize);
+    if (MenuIsOpen() && command == RID_INPUT && data != nullptr && got != static_cast<UINT>(-1) &&
+        got >= sizeof(RAWINPUTHEADER))
+        MenuConsumeRaw(static_cast<RAWINPUT*>(data));
+    return got;
 }
 
 static UINT WINAPI HookGetRawInputBuffer(PRAWINPUT data, PUINT size, UINT headerSize)
@@ -8431,9 +8494,12 @@ static UINT WINAPI HookGetRawInputBuffer(PRAWINPUT data, PUINT size, UINT header
         return real;
     // Append queued records after the real ones (each block 8-aligned, as NEXTRAWINPUTBLOCK walks them).
     unsigned char* cursor = reinterpret_cast<unsigned char*>(data);
+    const bool menu = MenuIsOpen();
     for (UINT i = 0; i < real; ++i)
     {
         PRAWINPUT block = reinterpret_cast<PRAWINPUT>(cursor);
+        if (menu)
+            MenuConsumeRaw(block);              // real records only; the fakes are appended below
         cursor += (block->header.dwSize + 7) & ~7u;
     }
     const unsigned char* end = reinterpret_cast<unsigned char*>(data) + *size;
@@ -8461,8 +8527,9 @@ static BOOL WINAPI HookGetCursorPos(LPPOINT p)
     if (g_fakeFocus && p != nullptr) { *p = g_fakeCursor; return TRUE; }
     return g_realGetCursorPos(p);
 }
-static BOOL WINAPI HookClipCursor(const RECT* r) { return g_fakeFocus ? TRUE : g_realClipCursor(r); }
-static BOOL WINAPI HookSetCursorPos(int x, int y) { return g_fakeFocus ? TRUE : g_realSetCursorPos(x, y); }
+// The game confines and recentres the cursor every frame; while the menu is open it may not.
+static BOOL WINAPI HookClipCursor(const RECT* r) { return (g_fakeFocus || MenuIsOpen()) ? TRUE : g_realClipCursor(r); }
+static BOOL WINAPI HookSetCursorPos(int x, int y) { return (g_fakeFocus || MenuIsOpen()) ? TRUE : g_realSetCursorPos(x, y); }
 
 // Re-points every pointer-sized slot in the module image that holds `target` (an import slot of the packed
 // executable) at `hook`. Returns the number of slots patched.
@@ -8525,6 +8592,7 @@ static std::string InstallInputHooks()
         if (fn == nullptr) continue;
         if (*s.real == nullptr) *s.real = fn;
         const int n = PatchPointerSlots(game, fn, s.hook);
+        InterlockedAdd(&g_inputHooksPatched, n);
         sprintf_s(line, " %s=%d", s.name, n);
         out += line;
     }
@@ -10461,9 +10529,15 @@ static DXGI_FORMAT OverlayViewFormat(DXGI_FORMAT format)
     }
 }
 
+static void MenuFrameInputs();         // F1 menu: raw input -> ImGui (defined below)
+static void MenuDraw();                // F1 menu window
+static void BadgeDraw();               // corner "gamelink - F1" badge
+static void MenuEnsureWindowHook(IDXGISwapChain* swapChain);
+static volatile bool g_badgeOn = true;
+
 static void OverlayFrame(IDXGISwapChain* swapChain)
 {
-    if (!g_overlayOn || g_overlayFailed)
+    if (g_overlayFailed)
         return;
     if (!g_overlayReady)
     {
@@ -10475,8 +10549,9 @@ static void OverlayFrame(IDXGISwapChain* swapChain)
         g_overlayReady = true;
     }
 
+    MenuEnsureWindowHook(swapChain);
     const DWORD now = GetTickCount();
-    if (now - g_overlayRefreshed >= 250)
+    if (g_overlayOn && now - g_overlayRefreshed >= 250)
     {
         g_overlayRefreshed = now;
         AcquireSRWLockExclusive(&g_formatLock);
@@ -10486,8 +10561,11 @@ static void OverlayFrame(IDXGISwapChain* swapChain)
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    MenuFrameInputs();
     ImGui::NewFrame();
     const ImGuiIO& io = ImGui::GetIO();
+    if (g_overlayOn)
+    {
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.62f, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.62f);
@@ -10518,6 +10596,11 @@ static void OverlayFrame(IDXGISwapChain* swapChain)
         draw(g_overlayProps);
     }
     ImGui::End();
+    }
+    if (MenuIsOpen())
+        MenuDraw();
+    if (g_badgeOn)
+        BadgeDraw();
     ImGui::Render();
 
     ID3D11Texture2D* back = nullptr;
@@ -10562,7 +10645,7 @@ static HWND g_overlayWindow = nullptr;
 
 static void OverlayKeys(IDXGISwapChain* swapChain)
 {
-    static bool f9Down = false, f10Down = false;
+    static bool f1Down = false, f9Down = false, f10Down = false;
     if (g_overlayWindow == nullptr)
     {
         DXGI_SWAP_CHAIN_DESC desc = {};
@@ -10570,6 +10653,13 @@ static void OverlayKeys(IDXGISwapChain* swapChain)
             g_overlayWindow = desc.OutputWindow;
     }
     if (g_overlayWindow == nullptr || GetForegroundWindow() != g_overlayWindow)
+        return;
+    // F1 - the menu - is always live once the present hook is in; F9/F10 only after 'overlay on'.
+    const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+    if (f1 && !f1Down)
+        g_menu.Toggle();
+    f1Down = f1;
+    if (!g_overlayKeysArmed)
         return;
     const bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
     const bool f10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
@@ -10583,9 +10673,8 @@ static void OverlayKeys(IDXGISwapChain* swapChain)
 
 static void OverlayFrameGuarded(IDXGISwapChain* swapChain)
 {
-    if (g_overlayKeysArmed)
-        OverlayKeys(swapChain);
-    if (!g_overlayOn)
+    OverlayKeys(swapChain);
+    if (!g_overlayOn && !MenuIsOpen() && !g_badgeOn)
         return;
     __try
     {
@@ -10595,6 +10684,141 @@ static void OverlayFrameGuarded(IDXGISwapChain* swapChain)
     {
         g_overlayFailed = true;                  // never take the game down for a debug overlay
     }
+}
+
+// ---- F1 menu: frame glue ------------------------------------------------------------------------------------
+// Keyboard and wheel arrive through the raw-input hooks (MenuConsumeRaw); mouse buttons are read directly; the
+// mouse position comes from the ImGui Win32 backend. Window messages are not fed to ImGui, so nothing is counted
+// twice. The WndProc subclass only closes the menu on focus loss and keeps legacy input messages from the game.
+static WNDPROC g_gameWndProc = nullptr;
+static HWND g_menuWindow = nullptr;
+static bool g_menuWasOpen = false;
+
+static LRESULT CALLBACK MenuWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_ACTIVATEAPP && wParam == FALSE)
+        g_menu.OnFocusLost();
+    if (g_menu.IsOpen())
+    {
+        const bool input = (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) ||
+                           (message >= WM_KEYFIRST && message <= WM_KEYLAST);
+        if (input)
+            return 0;
+    }
+    return CallWindowProcW(g_gameWndProc, window, message, wParam, lParam);
+}
+
+static void MenuEnsureWindowHook(IDXGISwapChain* swapChain)
+{
+    if (g_gameWndProc != nullptr)
+        return;
+    DXGI_SWAP_CHAIN_DESC desc = {};
+    if (FAILED(swapChain->GetDesc(&desc)) || desc.OutputWindow == nullptr)
+        return;
+    g_menuWindow = desc.OutputWindow;
+    g_gameWndProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(g_menuWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&MenuWndProc)));
+    LogLine("menu: window procedure hooked on 0x%p", g_menuWindow);
+}
+
+static void MenuFrameInputs()
+{
+    ImGuiIO& io = ImGui::GetIO();
+    const bool open = g_menu.IsOpen();
+    io.MouseDrawCursor = open;
+    UiInputLockInit();
+    std::vector<UiKey> keys;
+    EnterCriticalSection(&g_uiInputLock);
+    keys.swap(g_uiKeys);
+    LeaveCriticalSection(&g_uiInputLock);
+    const LONG wheel = InterlockedExchange(&g_uiWheel, 0);
+    if (!open)
+    {
+        if (g_menuWasOpen)                       // release everything ImGui thought was held
+        {
+            memset(io.KeysDown, 0, sizeof(io.KeysDown));
+            memset(io.MouseDown, 0, sizeof(io.MouseDown));
+        }
+        g_menuWasOpen = false;
+        return;
+    }
+    g_menuWasOpen = true;
+    io.MouseDown[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    io.MouseDown[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    io.MouseDown[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+    io.MouseWheel += static_cast<float>(wheel) / WHEEL_DELTA;
+    for (const UiKey& k : keys)
+    {
+        if (k.vk < 512)
+            io.KeysDown[k.vk] = k.down;
+        if (!k.down || k.vk == VK_F1)
+            continue;
+        BYTE state[256] = {};
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) state[VK_SHIFT] = 0x80;
+        if (GetKeyState(VK_CAPITAL) & 1) state[VK_CAPITAL] = 0x01;
+        wchar_t text[4] = {};
+        const int n = ToUnicode(k.vk, k.scan, state, text, 4, 0);
+        for (int i = 0; i < n; ++i)
+            if (text[i] >= 32)
+                io.AddInputCharacter(text[i]);
+    }
+}
+
+// Placeholder window until the tabs land (Task 5 replaces this with Menu_Frame from src/ui/menu.cpp).
+static void MenuDraw()
+{
+    ImGui::SetNextWindowSize(ImVec2(720.0f, 520.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("gamelink", nullptr, ImGuiWindowFlags_NoCollapse))
+    {
+        if (ImGui::BeginTabBar("tabs"))
+        {
+            for (int i = 0; i < static_cast<int>(MenuTab::Count); ++i)
+            {
+                if (ImGui::BeginTabItem(MenuTabName(static_cast<MenuTab>(i))))
+                {
+                    g_menu.SetTab(static_cast<MenuTab>(i));
+                    ImGui::TextUnformatted("Coming soon.");
+                    ImGui::EndTabItem();
+                }
+            }
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+}
+
+static void BadgeDraw()
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    const char* text = g_size == kExpectedModuleSize ? "gamelink  |  F1 menu" : "gamelink  |  unsupported game version";
+    const ImVec4 colour = g_size == kExpectedModuleSize ? ImVec4(0.36f, 0.84f, 0.48f, 0.9f) : ImVec4(1.0f, 0.76f, 0.28f, 0.95f);
+    const ImVec2 size = ImGui::CalcTextSize(text);
+    ImGui::GetForegroundDrawList()->AddText(ImVec2(io.DisplaySize.x - size.x - 14.0f, io.DisplaySize.y - size.y - 10.0f),
+                                            ImGui::ColorConvertFloat4ToU32(colour), text);
+}
+
+// Once the game window and its D3D device exist: the present hook (the menu's drawing) and the input hooks (the
+// menu's input). Retries the input hooks until the game's import slots are unpacked.
+static DWORD WINAPI MenuBootThread(LPVOID)
+{
+    for (int i = 0; i < 600; ++i)                 // up to ~20 minutes
+    {
+        Sleep(2000);
+        if (FindOwnGameWindow() == nullptr || GetModuleHandleW(L"d3d11.dll") == nullptr ||
+            GetModuleHandleW(L"dxgi.dll") == nullptr)
+            continue;
+        Sleep(3000);
+        const std::string err = InstallPresentHook();
+        LogLine("menu: present hook %s", err.empty() ? "installed - F1 opens the menu" : err.c_str());
+        for (int k = 0; k < 60 && g_inputHooksPatched == 0; ++k)
+        {
+            LogLine("menu: %s", InstallInputHooks().c_str());
+            if (g_inputHooksPatched == 0)
+                Sleep(5000);
+        }
+        return 0;
+    }
+    return 0;
 }
 
 // ---- wires: every connection of the loaded blueprints ----------------------------
@@ -11948,6 +12172,35 @@ static std::string HandleCommand(const std::string& line)
 
     if (command == "ping")
         return "pong gamelink";
+
+    // ui open|close|toggle|status|tab <name>|test-focuslost - the F1 menu, for scripts and tests.
+    if (command == "ui")
+    {
+        char sub[32] = {};
+        char arg[64] = {};
+        sscanf_s(rest, "%31s %63s", sub, static_cast<unsigned>(sizeof(sub)), arg, static_cast<unsigned>(sizeof(arg)));
+        const std::string s(sub);
+        if (s == "open") g_menu.Open();
+        else if (s == "close") g_menu.Close();
+        else if (s == "toggle") g_menu.Toggle();
+        else if (s == "test-focuslost") g_menu.OnFocusLost();
+        else if (s == "tab")
+        {
+            MenuTab tab;
+            if (!MenuTabFromName(arg, &tab))
+                return "ui: unknown tab (Camera World Inspector Logic Bots Diagnostics Advanced)";
+            g_menu.SetTab(tab);
+        }
+        else if (s != "status" && !s.empty())
+            return "usage: ui open|close|toggle|status|tab <name>|test-focuslost";
+        if (!g_menu.IsOpen())
+            return "ui closed";
+        char out[200];
+        sprintf_s(out, "ui open tab %s input %s (hooks %ld, scrubbed %ld)", MenuTabName(g_menu.Tab()),
+                  g_inputHooksPatched > 0 ? "blocked" : "not blocked", static_cast<long>(g_inputHooksPatched),
+                  static_cast<long>(g_menuScrubbed));
+        return out;
+    }
 
     // grabframe <file.bmp> - the presented frame from the game's own swap chain (see CaptureSwapChain). Not "capture":
     // that verb already installs the camera-transform detour further down.
@@ -16317,6 +16570,8 @@ static DWORD WINAPI Startup(LPVOID)
     CreateThread(nullptr, 0, CameraDriveThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, SelectionDrawThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LevelHoldThread, nullptr, 0, nullptr);
+    if (g_size == kExpectedModuleSize)           // the menu's hooks are build-specific
+        CreateThread(nullptr, 0, MenuBootThread, nullptr, 0, nullptr);
 
     ServerThread(nullptr);
     return 0;
@@ -16327,6 +16582,11 @@ static DWORD WINAPI Startup(LPVOID)
 std::string gl::Command(const std::string& line)
 {
     return gamelink::CommandForUi(line);
+}
+
+bool gl::MenuCapturesInput()
+{
+    return gamelink::MenuIsOpen();
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
