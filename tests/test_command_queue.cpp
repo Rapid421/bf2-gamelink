@@ -47,3 +47,24 @@ TEST(last_reply_by_verb)
     WaitIdle(q, id);
     CHECK(q.LastReply("timescale") == "time scaled");
 }
+
+TEST(describe_reports_running_and_pending)
+{
+    FakeReset();
+    g_fakeDelayMs = 300;
+    CommandQueue q(FakeExec);
+    const uint64_t a = q.Post("slow one");
+    q.Post("next");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const std::string d = q.Describe();
+    CHECK(d.find("running #1 'slow one'") != std::string::npos);
+    CHECK(d.find("pending 1") != std::string::npos);
+    WaitIdle(q, a);
+}
+
+TEST(id_zero_is_never_busy)
+{
+    FakeReset();
+    CommandQueue q(FakeExec);
+    CHECK(!q.Busy(0));                       // 0 = "never posted"; an idle queue must not report it busy
+}

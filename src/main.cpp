@@ -57,6 +57,7 @@
 #include "imgui_impl_win32.h"
 #include "gamelink_api.h"         // the in-game UI's interface to the rest of gamelink
 #include "ui/menu_state.h"        // F1 menu open/closed + tab
+#include "ui/menu.h"              // F1 menu window and tabs
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -10530,7 +10531,6 @@ static DXGI_FORMAT OverlayViewFormat(DXGI_FORMAT format)
 }
 
 static void MenuFrameInputs();         // F1 menu: raw input -> ImGui (defined below)
-static void MenuDraw();                // F1 menu window
 static void BadgeDraw();               // corner "gamelink - F1" badge
 static void MenuEnsureWindowHook(IDXGISwapChain* swapChain);
 static volatile bool g_badgeOn = true;
@@ -10597,9 +10597,8 @@ static void OverlayFrame(IDXGISwapChain* swapChain)
     }
     ImGui::End();
     }
-    if (MenuIsOpen())
-        MenuDraw();
-    if (g_badgeOn)
+    Menu_Frame(g_menu);                          // draws while open; camera travel and screenshots tick always
+    if (g_badgeOn && !Menu_HideOverlays())
         BadgeDraw();
     ImGui::Render();
 
@@ -10657,7 +10656,10 @@ static void OverlayKeys(IDXGISwapChain* swapChain)
     // F1 - the menu - is always live once the present hook is in; F9/F10 only after 'overlay on'.
     const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
     if (f1 && !f1Down)
+    {
         g_menu.Toggle();
+        LogLine("menu: F1 -> %s", g_menu.IsOpen() ? "open" : "closed");
+    }
     f1Down = f1;
     if (!g_overlayKeysArmed)
         return;
@@ -10764,33 +10766,10 @@ static void MenuFrameInputs()
     }
 }
 
-// Placeholder window until the tabs land (Task 5 replaces this with Menu_Frame from src/ui/menu.cpp).
-static void MenuDraw()
-{
-    ImGui::SetNextWindowSize(ImVec2(720.0f, 520.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("gamelink", nullptr, ImGuiWindowFlags_NoCollapse))
-    {
-        if (ImGui::BeginTabBar("tabs"))
-        {
-            for (int i = 0; i < static_cast<int>(MenuTab::Count); ++i)
-            {
-                if (ImGui::BeginTabItem(MenuTabName(static_cast<MenuTab>(i))))
-                {
-                    g_menu.SetTab(static_cast<MenuTab>(i));
-                    ImGui::TextUnformatted("Coming soon.");
-                    ImGui::EndTabItem();
-                }
-            }
-            ImGui::EndTabBar();
-        }
-    }
-    ImGui::End();
-}
-
 static void BadgeDraw()
 {
     const ImGuiIO& io = ImGui::GetIO();
-    const char* text = g_size == kExpectedModuleSize ? "gamelink  |  F1 menu" : "gamelink  |  unsupported game version";
+    const char* text = g_size == kExpectedModuleSize ? "gamelink - F1" : "gamelink - unsupported game version";
     const ImVec4 colour = g_size == kExpectedModuleSize ? ImVec4(0.36f, 0.84f, 0.48f, 0.9f) : ImVec4(1.0f, 0.76f, 0.28f, 0.95f);
     const ImVec2 size = ImGui::CalcTextSize(text);
     ImGui::GetForegroundDrawList()->AddText(ImVec2(io.DisplaySize.x - size.x - 14.0f, io.DisplaySize.y - size.y - 10.0f),
@@ -12173,6 +12152,30 @@ static std::string HandleCommand(const std::string& line)
     if (command == "ping")
         return "pong gamelink";
 
+    // help [verb] - every command with its one-line description (src/commands_table.inc), or just one.
+    if (command == "help")
+    {
+        static const struct { const char* verb; const char* text; } kCommands[] = {
+#include "commands_table.inc"
+        };
+        std::string out;
+        for (const auto& c : kCommands)
+            if (*rest == '\0' || strcmp(rest, c.verb) == 0)
+                out += std::string(c.text) + "\n";
+        return out.empty() ? std::string("help: no command called ") + rest : out;
+    }
+
+    // ticks - the server's frame counter (ServerGameContext +0x30 -> +0x0); sample twice to get the tick rate.
+    if (command == "ticks")
+    {
+        uintptr_t context = 0, clock = 0;
+        uint32_t ticks = 0;
+        if (!SafeRead(g_base + kServerGameContextRva, &context) || context == 0 ||
+            !SafeRead(context + 0x30, &clock) || clock == 0 || !SafeRead(clock, &ticks))
+            return "ticks unavailable (no server running)";
+        return "ticks " + std::to_string(ticks);
+    }
+
     // ui open|close|toggle|status|tab <name>|test-focuslost - the F1 menu, for scripts and tests.
     if (command == "ui")
     {
@@ -12180,6 +12183,12 @@ static std::string HandleCommand(const std::string& line)
         char arg[64] = {};
         sscanf_s(rest, "%31s %63s", sub, static_cast<unsigned>(sizeof(sub)), arg, static_cast<unsigned>(sizeof(arg)));
         const std::string s(sub);
+        if (s == "do")                           // ui do <control> <value>: what that widget does
+        {
+            char value[64] = {};
+            sscanf_s(rest, "%*s %*s %63s", value, static_cast<unsigned>(sizeof(value)));
+            return Menu_Do(arg, value);
+        }
         if (s == "open") g_menu.Open();
         else if (s == "close") g_menu.Close();
         else if (s == "toggle") g_menu.Toggle();
@@ -12192,7 +12201,7 @@ static std::string HandleCommand(const std::string& line)
             g_menu.SetTab(tab);
         }
         else if (s != "status" && !s.empty())
-            return "usage: ui open|close|toggle|status|tab <name>|test-focuslost";
+            return "usage: ui open|close|toggle|status|tab <name>|do <control> <value>|test-focuslost";
         if (!g_menu.IsOpen())
             return "ui closed";
         char out[200];
@@ -13943,10 +13952,23 @@ static std::string HandleCommand(const std::string& line)
                 return "frametimes: Present hook not installed: " + err;
             return "frametimes: Present hook installed - ask again in a few seconds";
         }
+        const LONG64 n = g_frameIndex;
+        int rawCount = 0;
+        if (sscanf_s(rest, "raw %d", &rawCount) == 1)      // frametimes raw <n>: the last n frames in ms, oldest first
+        {
+            if (rawCount > kFrameRing) rawCount = kFrameRing;
+            std::string out = "frames";
+            char one[16];
+            for (LONG64 i = (n - rawCount < 0 ? 0 : n - rawCount); i < n; ++i)
+            {
+                sprintf_s(one, " %.2f", g_frameMs[i % kFrameRing]);
+                out += one;
+            }
+            return out;
+        }
         double seconds = 10.0;
         if (rest != nullptr && *rest != '\0')
             sscanf_s(rest, "%lf", &seconds);
-        const LONG64 n = g_frameIndex;
         std::vector<float> v;
         double total = 0.0;
         for (LONG64 i = n - 1; i >= 0 && i >= n - kFrameRing; --i)
@@ -16290,6 +16312,7 @@ static bool GuardedHandle(const char* line, std::string* out)
 // The in-game UI's way in (gamelink_api.h): the same guarded path a TCP command takes.
 static std::string CommandForUi(const std::string& line)
 {
+    LogLine("menu command: %s", line.c_str());
     std::string out;
     if (!GuardedHandle(line.c_str(), &out))
         return "error: the command faulted (see the gamelink log)";

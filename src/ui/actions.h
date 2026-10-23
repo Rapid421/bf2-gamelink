@@ -26,3 +26,5 @@ struct FrameStats
     int over33 = 0, over50 = 0, over100 = 0;
 };
 bool ParseFrameTimes(const std::string& reply, FrameStats* out);
+// "frames 8.10 16.67 ..." from "frametimes raw <n>": per-frame milliseconds, oldest first.
+bool ParseFrameList(const std::string& reply, std::vector<float>* out);

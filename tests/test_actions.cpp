@@ -42,6 +42,15 @@ TEST(parse_camera_reply)
     CHECK(!ParseCamera("camera unavailable", pos));
 }
 
+TEST(parse_camera_real_reply)
+{
+    // Captured in game (Felucia_01, 2026-10-23 run task5_r1).
+    float pos[3] = {};
+    CHECK(ParseCamera("camera pos -40.651432 274.277954 73.604256 left -0.933455 0.000000 0.358693 up -0.053626 "
+                      "0.988761 -0.139555 forward -0.354662 -0.149503 -0.922965 fovx 1.4014995", pos));
+    CHECK(pos[0] == -40.651432f && pos[1] == 274.277954f && pos[2] == 73.604256f);
+}
+
 TEST(campath_steps_are_short_and_end_on_target)
 {
     const float from[3] = {0.f, 0.f, 0.f};
@@ -84,4 +93,14 @@ TEST(parse_frametimes_reply)
     CHECK(s.max == 31.86f);
     CHECK(s.over33 == 0 && s.over50 == 0 && s.over100 == 0);
     CHECK(!ParseFrameTimes("frametimes: no frames yet", &s));
+}
+
+TEST(parse_frame_list_reply)
+{
+    std::vector<float> ms;
+    CHECK(ParseFrameList("frames 8.10 16.67 33.40", &ms));
+    CHECK(ms.size() == 3);
+    CHECK(ms.size() == 3 && ms[0] == 8.10f && ms[2] == 33.40f);
+    CHECK(ParseFrameList("frames", &ms) && ms.empty());
+    CHECK(!ParseFrameList("frametimes: Present hook not installed", &ms));
 }

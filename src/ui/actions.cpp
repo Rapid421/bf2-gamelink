@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace
@@ -92,5 +93,20 @@ bool ParseFrameTimes(const std::string& reply, FrameStats* out)
     if (n != 11)
         return false;
     *out = s;
+    return true;
+}
+
+bool ParseFrameList(const std::string& reply, std::vector<float>* out)
+{
+    out->clear();
+    if (reply.compare(0, 6, "frames") != 0 || (reply.size() > 6 && reply[6] != ' '))
+        return false;
+    const char* p = reply.c_str() + 6;
+    char* end = nullptr;
+    for (float v = std::strtof(p, &end); end != p; v = std::strtof(p, &end))
+    {
+        out->push_back(v);
+        p = end;
+    }
     return true;
 }

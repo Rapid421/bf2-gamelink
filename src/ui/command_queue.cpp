@@ -30,6 +30,8 @@ uint64_t CommandQueue::Post(const std::string& line)
 
 bool CommandQueue::Busy(uint64_t id) const
 {
+    if (id == 0)                             // ids start at 1; m_running is 0 when idle
+        return false;
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_running == id)
         return true;
@@ -63,6 +65,22 @@ std::string CommandQueue::LastReply(const std::string& verb) const
     return "";
 }
 
+std::string CommandQueue::Describe() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::string out = "queue ";
+    if (m_running != 0)
+    {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                              m_runningSince).count();
+        out += "running #" + std::to_string(m_running) + " '" + m_runningLine + "' for " + std::to_string(ms) + " ms, ";
+    }
+    else
+        out += "idle, ";
+    return out + "pending " + std::to_string(m_pending.size()) + ", done " + std::to_string(m_done.size()) +
+           ", next #" + std::to_string(m_next);
+}
+
 void CommandQueue::Run()
 {
     for (;;)
@@ -76,6 +94,8 @@ void CommandQueue::Run()
             job = std::move(m_pending.front());
             m_pending.pop_front();
             m_running = job.first;
+            m_runningLine = job.second;
+            m_runningSince = std::chrono::steady_clock::now();
         }
         std::string reply;
         try

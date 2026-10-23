@@ -1,6 +1,7 @@
 #pragma once
 // CommandQueue - runs gamelink text commands on one background thread, in order, so a menu action never stalls
 // the game's frame (the menu draws on the present thread). Keeps the last 256 replies for the UI to show.
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -25,6 +26,8 @@ public:
     bool Reply(uint64_t id, std::string* out) const;
     // The newest finished reply to a command starting with this verb ("" if none).
     std::string LastReply(const std::string& verb) const;
+    // "queue running #7 'levelname' for 120 ms, pending 2, done 31" - for diagnosing a stuck command.
+    std::string Describe() const;
 
 private:
     struct Done { uint64_t id; std::string line; std::string reply; };
@@ -37,6 +40,8 @@ private:
     std::deque<Done> m_done;
     uint64_t m_next = 1;
     uint64_t m_running = 0;
+    std::string m_runningLine;
+    std::chrono::steady_clock::time_point m_runningSince;
     bool m_stop = false;
     std::thread m_thread;
 };

@@ -8,3 +8,4 @@ obj/
 *.log
 build.log
 .superpowers/
+__pycache__/
