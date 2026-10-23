@@ -7,3 +7,4 @@ obj/
 *.lib
 *.log
 build.log
+.superpowers/
