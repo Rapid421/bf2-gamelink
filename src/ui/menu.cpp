@@ -518,18 +518,18 @@ void Menu_Frame(MenuState& state)
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("gamelink", nullptr, ImGuiWindowFlags_NoCollapse))
     {
-        static int shown = -1;
+        static TabPicker picker;
         const int wanted = static_cast<int>(state.Tab());
+        const int force = picker.Force(wanted);
         if (ImGui::BeginTabBar("tabs"))
         {
             for (int i = 0; i < static_cast<int>(MenuTab::Count); ++i)
             {
-                const ImGuiTabItemFlags flags = (i == wanted && i != shown) ? ImGuiTabItemFlags_SetSelected : 0;
+                const ImGuiTabItemFlags flags = i == force ? ImGuiTabItemFlags_SetSelected : 0;
                 if (!ImGui::BeginTabItem(MenuTabName(static_cast<MenuTab>(i)), nullptr, flags))
                     continue;
-                if (i != shown && i != wanted && shown != -1)
+                if (picker.UserPicked(i, wanted))
                     state.SetTab(static_cast<MenuTab>(i));    // the user clicked this tab
-                shown = i;
                 switch (static_cast<MenuTab>(i))
                 {
                 case MenuTab::Camera: CameraTab(); break;
@@ -545,6 +545,7 @@ void Menu_Frame(MenuState& state)
             }
             ImGui::EndTabBar();
         }
+        picker.End(static_cast<int>(state.Tab()));
         ImGui::Separator();
         ImGui::TextDisabled("F1 closes this menu - the game gets its controls back.");
     }

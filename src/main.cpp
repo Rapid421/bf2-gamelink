@@ -731,7 +731,7 @@ static volatile float g_frameTestSize = 1.0f;
 // above almost everything, is one of its readers.
 static uintptr_t g_selectedEntity = 0;
 static char g_selectionLabel[320];   // two lines: what it is, then where
-static volatile bool g_showSelection = true;
+static volatile bool g_showSelection = false;   // off until asked for (showsel 1)
 static volatile bool g_selectionDrawing = false;
 
 // OX established tonight that DebugRenderer_current() picks its instance out of
@@ -1580,7 +1580,7 @@ static bool GameHasFocus()
 // implementation needs the entity helpers and lives further down.
 static std::string CastFromCamera(float range);
 static std::string PickFromCamera(float range);
-static volatile bool g_clickToSelect = true;
+static volatile bool g_clickToSelect = false;   // off until asked for (clickselect 1, or the Inspector tab)
 
 static volatile float g_lookSensitivity = 0.12f;   // degrees per mouse count
 static volatile bool g_invertYaw = true;           // both default to the way round
@@ -14634,7 +14634,7 @@ static std::string HandleCommand(const std::string& line)
         return buffer;
     }
 
-    // showsel <0|1> - draw the selection box and label. On by default; the
+    // showsel <0|1> - draw the selection box and label. Off by default; the
     // drawing thread starts on the first use.
     if (command == "showsel")
     {
@@ -14945,7 +14945,7 @@ static std::string HandleCommand(const std::string& line)
         return buffer;
     }
 
-    // clickselect <0|1> - whether a left click picks. On by default.
+    // clickselect <0|1> - whether a left click picks. Off by default: every shot would pick.
     if (command == "clickselect")
     {
         int enable = 1;
@@ -16253,28 +16253,13 @@ static std::string HandleCommand(const std::string& line)
         if (sscanf_s(rest, "%d", &value) != 1)
             return "usage: viewmode <n>";
 
-        if (!WalkRegistry())
-            return "registry walk failed";
-
-        const TypeRec* type = FindType("WorldRenderSettings");
-        if (type == nullptr)
-            return "WorldRenderSettings is not in the registry";
-
-        uint32_t offset = 0;
-        if (!ResolveField("WorldRenderSettings", "ViewMode", &offset))
-            return "ViewMode not found on WorldRenderSettings";
-
-        const std::vector<uintptr_t> instances = FindInstances(*type);
-        int written = 0;
-        for (uintptr_t instance : instances)
-        {
-            if (SafeWriteBytes(instance + offset, &value, sizeof(value)))
-                ++written;
-        }
-
+        // Through the settings writer: it remembers the instances, so only the first change scans memory (~30 s).
+        const int written = WriteSettingByName("WorldRenderSettings", "ViewMode", value, sizeof(value));
         char buffer[128];
-        sprintf_s(buffer, "viewmode %d written to %d/%zu instance(s)",
-                  value, written, instances.size());
+        if (written < 0)
+            sprintf_s(buffer, "viewmode: could not resolve WorldRenderSettings::ViewMode (code %d) - is a level loaded?", written);
+        else
+            sprintf_s(buffer, "viewmode %d written to %d instance(s)", value, written);
         LogLine("%s", buffer);
         return buffer;
     }

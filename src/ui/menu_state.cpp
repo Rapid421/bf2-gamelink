@@ -38,3 +38,14 @@ bool MenuState::IsOpen() const { return m_open.load(); }
 void MenuState::OnFocusLost() { m_open = false; }
 MenuTab MenuState::Tab() const { return static_cast<MenuTab>(m_tab.load()); }
 void MenuState::SetTab(MenuTab t) { m_tab = static_cast<int>(t); }
+
+int TabPicker::Force(int wanted)
+{
+    m_external = wanted != m_lastSeen;
+    return m_external ? wanted : -1;
+}
+
+bool TabPicker::UserPicked(int shown, int wanted) const
+{
+    return !m_external && shown != wanted;
+}

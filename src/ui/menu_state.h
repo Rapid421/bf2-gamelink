@@ -9,6 +9,20 @@ enum class MenuTab { Camera, World, Inspector, Logic, Bots, Diagnostics, Advance
 const char* MenuTabName(MenuTab t);
 bool MenuTabFromName(const std::string& name, MenuTab* out);   // case-insensitive
 
+// Keeps the tab bar and MenuState in step. A tab requested from outside (a script's "ui tab", the remembered tab
+// on first draw) is forced once; after that the tab ImGui shows is the user's choice. Tabs are ints (MenuTab).
+class TabPicker
+{
+public:
+    int Force(int wanted);                          // before the tab bar: the tab to force selected, or -1
+    bool UserPicked(int shown, int wanted) const;   // for the tab ImGui is showing: did the user just pick it?
+    void End(int wanted) { m_lastSeen = wanted; }   // after the tab bar, with the state's (possibly new) tab
+
+private:
+    int m_lastSeen = -1;
+    bool m_external = false;
+};
+
 class MenuState
 {
 public:
