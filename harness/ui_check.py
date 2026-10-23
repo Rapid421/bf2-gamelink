@@ -51,6 +51,14 @@ def log_lines(needle):
         return []
 
 
+def FrameStatsFps(reply):
+    """The fps figure from a 'frametimes' reply (0 when there is none)."""
+    try:
+        return float(reply.split(' fps')[0].split(', ')[-1])
+    except (IndexError, ValueError):
+        return 0.0
+
+
 def main():
     out = sys.argv[1]
     if len(out) > 2 and out[0] == '/' and out[2] == '/':        # an MSYS path (/d/...) from bash
@@ -136,6 +144,36 @@ def main():
     step('unknown control', 'ui do nope 1', lambda r: r.startswith('ui do: unknown control'))
     step('close at end', 'ui close', lambda r: r == 'ui closed')
 
+    # ---- Task 6: Diagnostics and Advanced ----
+    step('open Diagnostics', 'ui open', lambda r: r.startswith('ui open'))
+    send('ui tab diagnostics')
+    time.sleep(6.0)                               # it polls once a second while shown
+    diag = send('ui do diag')
+    ft = send('frametimes 10')
+    ui_fps = float(diag.split()[2]) if diag.startswith('diag fps') else 0.0
+    tcp = FrameStatsFps(ft)
+    steps.append({'step': 'Diagnostics fps within 10% of frametimes 10', 'reply': diag + ' || ' + ft,
+                  'pass': tcp > 0 and abs(ui_fps - tcp) <= 0.10 * tcp})
+    steps.append({'step': 'Diagnostics tick rate shown', 'reply': diag, 'pass': ' tickrate ' in diag and float(diag.split()[8]) > 0})
+    t1 = send('ticks')
+    time.sleep(1.0)
+    t2 = send('ticks')
+    try:
+        dt = int(t2.split()[1]) - int(t1.split()[1])
+    except (IndexError, ValueError):
+        dt = -1
+    steps.append({'step': 'ticks 1 s apart differ by 28-32', 'reply': '%s -> %s (%d)' % (t1, t2, dt), 'pass': 28 <= dt <= 32})
+    step('frame Diagnostics tab', 'grabframe %s\\menu_diagnostics.bmp' % out.replace('/', '\\'), lambda r: r.startswith('captured'))
+    send('ui tab advanced')
+    step('console levelname', 'ui do console levelname', lambda r: r.endswith('queued'))
+    time.sleep(1.0)
+    mine, theirs = send('ui do console-last'), send('levelname')
+    steps.append({'step': 'console reply equals TCP reply', 'reply': mine + ' || ' + theirs, 'pass': mine == theirs and mine != ''})
+    step('help lists commands', 'help ui', lambda r: r.startswith('ui open|close'))
+    time.sleep(1.0)
+    step('frame Advanced tab', 'grabframe %s\\menu_advanced.bmp' % out.replace('/', '\\'), lambda r: r.startswith('captured'))
+    send('ui close')
+
     t = time.time()
     queue = send('ui do queue')
     while queue.count('idle') < 2 and time.time() - t < 15:
@@ -146,7 +184,7 @@ def main():
         with open(out + '/threads.txt', 'w', encoding='utf-8') as f:
             f.write(send('threads', timeout=40))
 
-    menu_log = log_lines('menu:') + log_lines('inputhook:') + log_lines('menu command:')
+    menu_log = log_lines('menu:') + log_lines('inputhook:')
     faults = [l for l in log_lines('') if 'fault' in l.lower() or 'exception' in l.lower()]
     result = {'pass': all(s['pass'] for s in steps), 'steps': steps, 'menu_log': menu_log[-12:],
               'fault_lines': faults[-12:], 'seconds': round(time.time() - T0, 1)}

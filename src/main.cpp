@@ -16312,8 +16312,7 @@ static bool GuardedHandle(const char* line, std::string* out)
 // The in-game UI's way in (gamelink_api.h): the same guarded path a TCP command takes.
 static std::string CommandForUi(const std::string& line)
 {
-    LogLine("menu command: %s", line.c_str());
-    std::string out;
+    std::string out;                             // not logged: the Diagnostics tab polls 6 commands a second
     if (!GuardedHandle(line.c_str(), &out))
         return "error: the command faulted (see the gamelink log)";
     return out;

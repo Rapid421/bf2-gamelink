@@ -52,6 +52,24 @@ void LoadCommands(CommandQueue& q)
 }
 }   // namespace
 
+void AdvancedSubmit(CommandQueue& q, const std::string& line)
+{
+    if (line.empty())
+        return;
+    g_entries.push_back({line, q.Post(line)});
+    if (g_entries.size() > 50)
+        g_entries.pop_front();
+    g_history.Push(line);
+}
+
+std::string AdvancedLastReply(CommandQueue& q)
+{
+    std::string reply;
+    if (g_entries.empty() || !q.Reply(g_entries.back().id, &reply))
+        return "";
+    return reply;
+}
+
 void AdvancedTab(CommandQueue& q)
 {
     LoadCommands(q);
@@ -68,14 +86,7 @@ void AdvancedTab(CommandQueue& q)
     if (ImGui::InputText("##cmd", g_input, sizeof(g_input),
                          ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory, OnHistory))
     {
-        const std::string line = g_input;
-        if (!line.empty())
-        {
-            g_entries.push_back({line, q.Post(line)});
-            if (g_entries.size() > 50)
-                g_entries.pop_front();
-            g_history.Push(line);
-        }
+        AdvancedSubmit(q, g_input);
         g_input[0] = '\0';
         g_focusInput = true;
     }

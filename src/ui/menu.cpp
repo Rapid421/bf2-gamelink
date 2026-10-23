@@ -18,6 +18,7 @@
 #include "ui/actions.h"
 #include "ui/command_queue.h"
 #include "ui/menu_state.h"
+#include "ui/menu_tabs.h"
 #include "ui/settings.h"
 
 namespace
@@ -536,8 +537,8 @@ void Menu_Frame(MenuState& state)
                 case MenuTab::Inspector: ComingSoon("Inspector: pick anything in the world and see what it is."); break;
                 case MenuTab::Logic: ComingSoon("Logic: watch an object's logic fire, step by step."); break;
                 case MenuTab::Bots: ComingSoon("Bots: team sizes up to 64 v 64."); break;
-                case MenuTab::Diagnostics: ComingSoon("Diagnostics: frame times, tick rate and the gamelink log."); break;
-                case MenuTab::Advanced: ComingSoon("Advanced: type any gamelink command."); break;
+                case MenuTab::Diagnostics: DiagnosticsTab(*g_queue); break;
+                case MenuTab::Advanced: AdvancedTab(*g_queue); break;
                 default: break;
                 }
                 ImGui::EndTabItem();
@@ -574,6 +575,15 @@ std::string Menu_Do(const std::string& id, const std::string& value)
     else if (id == "camera.go") DoSpot(static_cast<int>(v) - 1, true);
     else if (id == "world.timescale") DoTimeScale(v);
     else if (id == "world.viewmode") DoViewMode(static_cast<int>(v));
+    else if (id == "diag")                                  // ui do diag: the Diagnostics tab's numbers
+        return DiagnosticsSummary();
+    else if (id == "console")                               // ui do console <command>: Enter in the Advanced tab
+    {
+        AdvancedSubmit(*g_queue, value);
+        return "ui do console " + value + " -> queued";
+    }
+    else if (id == "console-last")
+        return AdvancedLastReply(*g_queue);
     else if (id == "queue")                                 // ui do queue: what the menu's command thread is doing
         return g_queue->Describe() + " | slow lane " + g_slow->Describe();
     else if (id == "last")                                  // ui do last <control>: its newest reply

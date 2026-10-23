@@ -50,6 +50,7 @@ cl /nologo /LD /O2 /MT /EHa /W3 /std:c++17 ^
    /Fe:"%OUT%\FrostyGameLink.dll" ^
    /Fo:"%OBJ%\dll\\" ^
    "%ROOT%\src\main.cpp" %UI_LOGIC% "%ROOT%\src\ui\menu.cpp" "%ROOT%\src\ui\style.cpp" ^
+   "%ROOT%\src\ui\tab_diagnostics.cpp" "%ROOT%\src\ui\tab_advanced.cpp" ^
    "%ROOT%\src\imgui\imgui.cpp" "%ROOT%\src\imgui\imgui_draw.cpp" "%ROOT%\src\imgui\imgui_widgets.cpp" ^
    "%ROOT%\src\imgui\imgui_impl_dx11.cpp" "%ROOT%\src\imgui\imgui_impl_win32.cpp" ^
    /link /DLL ws2_32.lib psapi.lib dbghelp.lib user32.lib d3dcompiler.lib gdi32.lib

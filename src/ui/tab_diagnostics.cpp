@@ -39,6 +39,16 @@ void Ask(CommandQueue& q, Poll& p)
 }
 }   // namespace
 
+std::string DiagnosticsSummary()
+{
+    FrameStats s;
+    ParseFrameTimes(g_stats.reply, &s);
+    char b[160];
+    sprintf_s(b, "diag fps %.1f p99 %.2f over33 %d tickrate %.1f graph %zu", s.fps, s.p99, s.over33, g_tickRate,
+              g_graph.size());
+    return b;
+}
+
 void DiagnosticsTab(CommandQueue& q)
 {
     const double now = Now();
