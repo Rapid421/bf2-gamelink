@@ -89,6 +89,7 @@ bool LoadSettings(const std::wstring& path, UiSettings* out)
     if (ReadInt(path, L"teamSize1", &i)) { out->teamSize1 = Clamp(i, 1, 64); any = true; }
     if (ReadInt(path, L"teamSize2", &i)) { out->teamSize2 = Clamp(i, 1, 64); any = true; }
     if (ReadInt(path, L"openOnStart", &i)) { out->openOnStart = i != 0; any = true; }
+    if (ReadInt(path, L"bigBattles", &i)) { out->bigBattles = i != 0; any = true; }
     for (int k = 0; k < 8; ++k)
     {
         wchar_t key[16];
@@ -107,6 +108,7 @@ bool SaveSettings(const std::wstring& path, const UiSettings& s)
     ok &= Write(path, L"teamSize1", std::to_wstring(s.teamSize1));
     ok &= Write(path, L"teamSize2", std::to_wstring(s.teamSize2));
     ok &= Write(path, L"openOnStart", s.openOnStart ? L"1" : L"0");
+    ok &= Write(path, L"bigBattles", s.bigBattles ? L"1" : L"0");
     for (int k = 0; k < 8; ++k)
     {
         wchar_t key[16];

@@ -21,7 +21,8 @@ cursor is free. F1 or clicking another window closes it.
 | **World** | Level and mode names, time scale (pause, slow motion, normal), render view modes |
 | **Diagnostics** | Live frame-time graph, FPS, p99, server tick rate, the gamelink log, "Copy diagnostics" |
 | **Advanced** | A console for any gamelink command, with history and a searchable list of every command |
-| Inspector, Logic, Bots | Not finished yet - see the roadmap |
+| **Bots** | Big bot battles up to 64 v 64 players (you count as one): team sizes, live players and alive soldiers per team. Remembered between runs - with it on, gamelink fixes the player cap as the game starts, so every match gets the full teams. Switched on mid-match, it takes full effect from the next match |
+| Inspector, Logic | Not finished yet - see the roadmap |
 
 The first time you change an engine setting (time scale, view mode, HUD, FOV) in a match, it can take up to about
 30 seconds: gamelink has to find the setting in memory once. After that, changes are instant.
@@ -73,7 +74,7 @@ in a match. A one-click launcher is on the roadmap. Its log is `C:\ProgramData\F
 
 ## Roadmap
 
-1. **Bots tab** - team sizes up to 64 v 64 (the engine work is done and proven; the tab is being built now)
+1. ~~Bots tab~~ - done: 64 v 64 verified in game (64 players and 64 live soldiers per team, Felucia)
 2. **Inspector** - click anything in the world and see what it is: asset path, mesh, class, position; edit its
    properties
 3. **Logic debugger** - pick one object and watch its logic fire as a readable graph and timeline, with pause,
@@ -83,3 +84,10 @@ in a match. A one-click launcher is on the roadmap. Its log is `C:\ProgramData\F
 ## Licence
 
 MIT - see [LICENSE](LICENSE). Dear ImGui is MIT, Copyright Omar Cornut.
+
+## Known issues
+
+- **Photo mode can crash the game during a 64 v 64 battle** (the engine runs out of memory: `game+0xA9EBFB`, in
+  `virtualalloc.c`). Being investigated - avoid Photo mode with big battles for now.
+- Big battles need a lot of memory. Close other heavy programs, and keep free space on the drive that holds the
+  Windows page file.

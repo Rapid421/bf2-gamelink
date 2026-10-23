@@ -81,3 +81,17 @@ TEST(out_of_range_is_clamped)
     CHECK(s.timeScale == 0.f);
     DeleteFileW(path.c_str());
 }
+
+TEST(big_battles_flag_roundtrips_and_defaults_off)
+{
+    const std::wstring path = TempFile(L"gl_settings_bots.ini");
+    DeleteFileW(path.c_str());
+    UiSettings fresh;
+    CHECK(!fresh.bigBattles);
+    UiSettings a;
+    a.bigBattles = true;
+    CHECK(SaveSettings(path, a));
+    UiSettings b;
+    CHECK(LoadSettings(path, &b));
+    CHECK(b.bigBattles);
+}

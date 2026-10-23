@@ -536,7 +536,7 @@ void Menu_Frame(MenuState& state)
                 case MenuTab::World: WorldTab(); break;
                 case MenuTab::Inspector: ComingSoon("Inspector: pick anything in the world and see what it is."); break;
                 case MenuTab::Logic: ComingSoon("Logic: watch an object's logic fire, step by step."); break;
-                case MenuTab::Bots: ComingSoon("Bots: team sizes up to 64 v 64."); break;
+                case MenuTab::Bots: BotsTab(*g_queue, g_set, Save); break;
                 case MenuTab::Diagnostics: DiagnosticsTab(*g_queue); break;
                 case MenuTab::Advanced: AdvancedTab(*g_queue); break;
                 default: break;
@@ -576,6 +576,8 @@ std::string Menu_Do(const std::string& id, const std::string& value)
     else if (id == "camera.go") DoSpot(static_cast<int>(v) - 1, true);
     else if (id == "world.timescale") DoTimeScale(v);
     else if (id == "world.viewmode") DoViewMode(static_cast<int>(v));
+    else if (id.compare(0, 5, "bots.") == 0)                // ui do bots.on 1 | bots.set 64 64 | bots.last
+        return BotsDo(*g_queue, g_set, Save, id, value);
     else if (id == "diag")                                  // ui do diag: the Diagnostics tab's numbers
         return DiagnosticsSummary();
     else if (id == "console")                               // ui do console <command>: Enter in the Advanced tab

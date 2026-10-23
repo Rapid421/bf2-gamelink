@@ -11,6 +11,7 @@ struct UiSettings
     int teamSize1 = 64;          // 1..64, humans included
     int teamSize2 = 64;
     bool openOnStart = false;
+    bool bigBattles = false;     // Bots tab on: gamelink fixes the player cap at startup and holds the team sizes
     std::string camSpots[8];     // "name x y z yaw pitch", or empty
 };
 

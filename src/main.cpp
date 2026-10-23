@@ -58,6 +58,8 @@
 #include "gamelink_api.h"         // the in-game UI's interface to the rest of gamelink
 #include "ui/menu_state.h"        // F1 menu open/closed + tab
 #include "ui/menu.h"              // F1 menu window and tabs
+#include "bots_logic.h"           // team fill steps and cap arithmetic for "bots"
+#include "ui/settings.h"           // big battles at startup (settings.ini)
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -6040,6 +6042,30 @@ static std::string InstallCameraHook(bool enable)
 // ---------------------------------------------------------------------------
 static volatile bool g_spectateWanted = false;
 
+// FindInstances walks all of memory (~30 s in a level), so the instances are remembered per
+// type and re-checked on use - still [vtable in module][this type's ClassInfo] - and the scan
+// runs again only when none of them is (a level change frees them). Registry lock held.
+static std::vector<uintptr_t> CachedInstancesUnlocked(const TypeRec& type)
+{
+    static std::unordered_map<std::string, std::vector<uintptr_t>> cache;
+    std::vector<uintptr_t> instances;
+    auto cached = cache.find(type.name);
+    if (cached != cache.end())
+        for (uintptr_t candidate : cached->second)
+        {
+            uintptr_t vtable = 0, info = 0;
+            if (SafeRead(candidate, &vtable) && vtable >= g_base && vtable < g_base + g_size &&
+                SafeRead(candidate + 8, &info) && (info == type.classInfo || info == type.typeInfo))
+                instances.push_back(candidate);
+        }
+    if (instances.empty())
+    {
+        instances = FindInstances(type);
+        cache[type.name] = instances;
+    }
+    return instances;
+}
+
 static int WriteSettingByNameUnlocked(const char* typeName, const char* fieldName,
                                       long long value, size_t width)
 {
@@ -6054,25 +6080,7 @@ static int WriteSettingByNameUnlocked(const char* typeName, const char* fieldNam
     if (!ResolveField(typeName, fieldName, &offset))
         return -3;
 
-    // FindInstances walks all of memory (~30 s in a level), so the instances are remembered per
-    // type and re-checked on use - still [vtable in module][this type's ClassInfo] - and the scan
-    // runs again only when none of them is (a level change frees them).
-    static std::unordered_map<std::string, std::vector<uintptr_t>> cache;
-    std::vector<uintptr_t> instances;
-    auto cached = cache.find(typeName);
-    if (cached != cache.end())
-        for (uintptr_t candidate : cached->second)
-        {
-            uintptr_t vtable = 0, info = 0;
-            if (SafeRead(candidate, &vtable) && vtable >= g_base && vtable < g_base + g_size &&
-                SafeRead(candidate + 8, &info) && (info == type->classInfo || info == type->typeInfo))
-                instances.push_back(candidate);
-        }
-    if (instances.empty())
-    {
-        instances = FindInstances(*type);
-        cache[typeName] = instances;
-    }
+    const std::vector<uintptr_t> instances = CachedInstancesUnlocked(*type);
     if (instances.empty())
         return -4;
 
@@ -9356,6 +9364,355 @@ static std::string PoolGrowInstall()
     return buf;
 }
 
+// ---- bots: big bot battles (port of the standalone bf2-64v64 DLL) ------------------------------------------------
+//
+// Three things stand between a match and 64 v 64:
+//   * the player cap - the level's ServerPlayerManager copies GameSettings.MaxPlayerCount (66 from the boot config)
+//     once, when it is built. Both player-manager factories read it with 'mov r8d,[rcx+20h] / mov rdx,[rcx+40h]'
+//     (game+0x182FF3, game+0x183C2B); capfix makes those reads load a fixed number instead. Race-free, but only for
+//     managers built afterwards: it takes effect from the next match.
+//   * the 64-slot pool - poolgrow (above).
+//   * the bots themselves - AutoPlayerSettings.ForceFillGameplayBotsTeam1/2 (+ apply flag), held by a thread so each
+//     team ends at its size including humans; the round logic writes its own values at start and they are put back.
+//     Spawn throttle: MaxSpawnsPerUpdate >= 8, SpawnRate x2 (both restored by "bots off").
+static const uintptr_t kCapReads[] = {0x182FF3, 0x183C2B};
+static unsigned char* g_capStubs[2] = {};
+static volatile LONG g_capValue = 0;
+
+static uintptr_t CurrentPlayerManager()
+{
+    uintptr_t context = 0, manager = 0;
+    if (SafeRead(g_base + kServerGameContextRva, &context) && context != 0)
+        SafeRead(context + 0x58, &manager);
+    return manager;
+}
+
+static std::string CapFix(int cap)
+{
+    if (cap < 2 || cap > 250)
+        return "usage: capfix <2..250>   (player ids are 8-bit)";
+    static const unsigned char expect[] = {0x44, 0x8B, 0x41, 0x20, 0x48, 0x8B, 0x51, 0x40};
+    int sites = 0;
+    for (int i = 0; i < 2; ++i)
+    {
+        const uintptr_t site = g_base + kCapReads[i];
+        if (g_capStubs[i] != nullptr)                    // already patched: change the number the stub loads
+        {
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(g_capStubs[i] + 2), cap);
+            ++sites;
+            continue;
+        }
+        unsigned char have[sizeof(expect)] = {};
+        if (!SafeReadBytes(site, have, sizeof(have)) || memcmp(have, expect, sizeof(expect)) != 0)
+            continue;
+        unsigned char* stub = NearCode(site, 32);
+        if (stub == nullptr)
+            continue;
+        unsigned char s[24];
+        size_t n = 0;
+        s[n++] = 0x41; s[n++] = 0xB8;                                // mov r8d, cap   (imm at stub+2)
+        memcpy(s + n, &cap, 4); n += 4;
+        s[n++] = 0x48; s[n++] = 0x8B; s[n++] = 0x51; s[n++] = 0x40;  // mov rdx,[rcx+40h]
+        s[n++] = 0xE9;                                               // jmp site+8
+        const int32_t back = static_cast<int32_t>(static_cast<intptr_t>(site + 8) -
+                                                  static_cast<intptr_t>(reinterpret_cast<uintptr_t>(stub) + n + 4));
+        memcpy(s + n, &back, 4); n += 4;
+        memcpy(stub, s, n);
+        FlushInstructionCache(GetCurrentProcess(), stub, n);
+        unsigned char patch[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+        const int32_t to = static_cast<int32_t>(static_cast<intptr_t>(reinterpret_cast<uintptr_t>(stub)) -
+                                                static_cast<intptr_t>(site + 5));
+        memcpy(patch + 1, &to, 4);
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(site), sizeof(patch), PAGE_EXECUTE_READWRITE, &old))
+            continue;
+        memcpy(reinterpret_cast<void*>(site), patch, sizeof(patch));
+        DWORD ignored = 0;
+        VirtualProtect(reinterpret_cast<void*>(site), sizeof(patch), old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), sizeof(patch));
+        g_capStubs[i] = stub;
+        ++sites;
+    }
+    if (sites == 0)
+        return "capfix: the player-manager factory bytes differ - not unpacked yet, or a different build";
+    InterlockedExchange(&g_capValue, cap);
+    LogLine("capfix: player-manager factories now load %d (%d of 2 sites)", cap, sites);
+    char out[200];
+    sprintf_s(out, "capfix %d (%d of 2 sites)", cap, sites);
+    std::string reply = out;
+    uint32_t current = 0;
+    const uintptr_t manager = CurrentPlayerManager();
+    if (manager != 0 && SafeRead(manager + 0x10, &current) && current < static_cast<uint32_t>(cap))
+    {
+        sprintf_s(out, " - takes effect next match (this match's cap is %u)", current);
+        reply += out;
+    }
+    return reply;
+}
+
+struct BotTuned { uintptr_t instance; int fill1, fill2; float spawnRate; int maxSpawns; };
+static CRITICAL_SECTION g_botsLock;
+static volatile LONG g_botsLockReady = 0;
+static volatile bool g_botsOn = false;
+static bool g_botsThreadStarted = false;
+static int g_botTarget[2] = {64, 64};
+static int g_botFill[2] = {63, 63}, g_botPrev[2] = {-1, -1};
+static int g_botPlayers[2] = {0, 0}, g_botAlive[2] = {0, 0};
+static uintptr_t g_botManager = 0;
+static ULONGLONG g_botLevelSince = 0, g_botLastStep = 0;
+static std::vector<BotTuned> g_botTuned;      // every AutoPlayerSettings touched, with its values before
+static std::string g_botNote;                 // why bots are not running, for "bots status"
+
+static void BotsLockInit()
+{
+    if (InterlockedCompareExchange(&g_botsLockReady, 1, 0) == 0)
+        InitializeCriticalSection(&g_botsLock);
+}
+
+struct BotFields { uint32_t fill1 = 0, fill2 = 0, apply = 0, rate = 0, maxSpawns = 0; };
+
+// AutoPlayerSettings instances and field offsets from the reflection registry (first call scans memory, ~30 s).
+static bool BotSettings(std::vector<uintptr_t>* instances, BotFields* f)
+{
+    LockRegistry();
+    bool ok = WalkRegistryUnlocked();
+    const TypeRec* type = ok ? FindType("AutoPlayerSettings") : nullptr;
+    ok = type != nullptr && ResolveField("AutoPlayerSettings", "ForceFillGameplayBotsTeam1", &f->fill1) &&
+         ResolveField("AutoPlayerSettings", "ForceFillGameplayBotsTeam2", &f->fill2) &&
+         ResolveField("AutoPlayerSettings", "ForceApplyGameplayBotsCount", &f->apply) &&
+         ResolveField("AutoPlayerSettings", "SpawnRate", &f->rate) &&
+         ResolveField("AutoPlayerSettings", "MaxSpawnsPerUpdate", &f->maxSpawns);
+    if (ok)
+        *instances = CachedInstancesUnlocked(*type);
+    UnlockRegistry();
+    return ok && !instances->empty();
+}
+
+// Players per team on the server, and how many of them have a live soldier (ServerPlayer +0x290 points at a
+// WSServerSoldierEntity, vtable game+0x31C6ED0).
+static bool BotTeamCounts(uintptr_t manager, int players[2], int alive[2])
+{
+    uintptr_t begin = 0, end = 0;
+    if (!SafeRead(manager + 0xC8, &begin) || !SafeRead(manager + 0xD0, &end) || end < begin || end - begin > 8 * 512)
+        return false;
+    players[0] = players[1] = alive[0] = alive[1] = 0;
+    for (uintptr_t p = begin; p < end; p += 8)
+    {
+        uintptr_t player = 0, soldier = 0, vtable = 0;
+        int team = 0;
+        if (!SafeRead(p, &player) || !SafeRead(player + 0x58, &team) || (team != 1 && team != 2))
+            continue;
+        ++players[team - 1];
+        if (SafeRead(player + 0x290, &soldier) && soldier != 0 && SafeRead(soldier, &vtable) &&
+            vtable == g_base + 0x31C6ED0)
+            ++alive[team - 1];
+    }
+    return true;
+}
+
+static void BotsApply(bool on)
+{
+    std::vector<uintptr_t> instances;
+    BotFields f;
+    if (!BotSettings(&instances, &f))
+    {
+        EnterCriticalSection(&g_botsLock);
+        g_botNote = "AutoPlayerSettings not found yet - is a match loaded?";
+        LeaveCriticalSection(&g_botsLock);
+        return;
+    }
+    EnterCriticalSection(&g_botsLock);
+    g_botNote.clear();
+    for (uintptr_t s : instances)
+    {
+        auto known = std::find_if(g_botTuned.begin(), g_botTuned.end(), [s](const BotTuned& t) { return t.instance == s; });
+        if (known == g_botTuned.end())
+        {
+            BotTuned t = {s, 0, 0, 0.0f, 0};
+            SafeRead(s + f.fill1, &t.fill1);
+            SafeRead(s + f.fill2, &t.fill2);
+            SafeRead(s + f.rate, &t.spawnRate);
+            SafeRead(s + f.maxSpawns, &t.maxSpawns);
+            g_botTuned.push_back(t);
+            known = g_botTuned.end() - 1;
+            if (on)
+            {
+                const float rate = t.spawnRate > 0.0f ? t.spawnRate * 2.0f : 2.0f;
+                const int maxSpawns = t.maxSpawns < 8 ? 8 : t.maxSpawns;
+                SafeWriteBytes(s + f.rate, &rate, sizeof(rate));
+                SafeWriteBytes(s + f.maxSpawns, &maxSpawns, sizeof(maxSpawns));
+            }
+        }
+        const int want1 = on ? g_botFill[0] : known->fill1, want2 = on ? g_botFill[1] : known->fill2;
+        int have1 = 0, have2 = 0;
+        SafeRead(s + f.fill1, &have1);
+        SafeRead(s + f.fill2, &have2);
+        if (have1 != want1 || have2 != want2)
+        {
+            const uint8_t apply = 1;
+            SafeWriteBytes(s + f.fill1, &want1, sizeof(want1));
+            SafeWriteBytes(s + f.fill2, &want2, sizeof(want2));
+            SafeWriteBytes(s + f.apply, &apply, sizeof(apply));
+        }
+        if (!on)
+        {
+            SafeWriteBytes(s + f.rate, &known->spawnRate, sizeof(known->spawnRate));
+            SafeWriteBytes(s + f.maxSpawns, &known->maxSpawns, sizeof(known->maxSpawns));
+        }
+    }
+    if (!on)
+        g_botTuned.clear();
+    LeaveCriticalSection(&g_botsLock);
+}
+
+static DWORD WINAPI BotsThread(LPVOID)
+{
+    for (;;)
+    {
+        Sleep(500);
+        if (!g_botsOn)
+            continue;
+        const uintptr_t manager = CurrentPlayerManager();
+        const ULONGLONG now = GetTickCount64();
+        if (manager == 0)
+        {
+            EnterCriticalSection(&g_botsLock);
+            g_botManager = 0;
+            g_botNote = "waiting for a match";
+            LeaveCriticalSection(&g_botsLock);
+            continue;
+        }
+        EnterCriticalSection(&g_botsLock);
+        if (manager != g_botManager)                      // a new match (or the first look at this one)
+        {
+            g_botManager = manager;
+            g_botLevelSince = now;
+            g_botTuned.clear();                           // the old match's settings objects are gone
+            for (int t = 0; t < 2; ++t)
+            {
+                g_botFill[t] = g_botTarget[t] - 1;        // one short: topped up once humans are counted
+                g_botPrev[t] = -1;
+            }
+        }
+        int players[2] = {}, alive[2] = {};
+        if (BotTeamCounts(manager, players, alive))
+        {
+            memcpy(g_botPlayers, players, sizeof(players));
+            memcpy(g_botAlive, alive, sizeof(alive));
+            if (now - g_botLevelSince > 20000 && now - g_botLastStep > 5000)
+            {
+                g_botLastStep = now;
+                for (int t = 0; t < 2; ++t)
+                {
+                    g_botFill[t] = NextFill(g_botFill[t], players[t], g_botPrev[t], g_botTarget[t]);
+                    g_botPrev[t] = players[t];
+                }
+            }
+        }
+        LeaveCriticalSection(&g_botsLock);
+        BotsApply(true);
+    }
+}
+
+static std::string BotsStatus()
+{
+    EnterCriticalSection(&g_botsLock);
+    uint32_t cap = 0;
+    const uintptr_t manager = CurrentPlayerManager();
+    if (manager != 0)
+        SafeRead(manager + 0x10, &cap);
+    char out[400];
+    sprintf_s(out, "bots %s %dv%d players %d/%d alive %d/%d cap %u capfix %ld pool %s overflow %ld refused %ld%s%s",
+              g_botsOn ? "on" : "off", g_botTarget[0], g_botTarget[1], g_botPlayers[0], g_botPlayers[1], g_botAlive[0],
+              g_botAlive[1], cap, g_capValue, g_poolGrowOn ? "on" : "off", g_poolOverflowed, g_poolRefused,
+              g_botNote.empty() ? "" : " - ", g_botNote.c_str());
+    LeaveCriticalSection(&g_botsLock);
+    return out;
+}
+
+static std::string BotsCommand(const char* rest)
+{
+    BotsLockInit();
+    char sub[16] = {};
+    sscanf_s(rest, "%15s", sub, static_cast<unsigned>(sizeof(sub)));
+    const std::string s(sub);
+    if (s == "set")
+    {
+        int a = 0, b = 0;
+        const char* sizes = strstr(rest, "set") + 3;
+        if (!ParseTeamSizes(sizes, &a, &b))
+            return "usage: bots set <team1 1..64> <team2 1..64>   (players per team, humans included)";
+        std::string notes;
+        if (!g_poolGrowOn)
+            notes = " | " + PoolGrowInstall();
+        if (g_capValue < CapFor(a, b))
+            notes += " | " + CapFix(CapFor(a, b));
+        EnterCriticalSection(&g_botsLock);
+        g_botTarget[0] = a;
+        g_botTarget[1] = b;
+        g_botManager = 0;                                 // restart the fill from one short
+        g_botNote.clear();
+        LeaveCriticalSection(&g_botsLock);
+        g_botsOn = true;
+        if (!g_botsThreadStarted)
+        {
+            g_botsThreadStarted = true;
+            HANDLE thread = CreateThread(nullptr, 0, BotsThread, nullptr, 0, nullptr);
+            if (thread != nullptr)
+                CloseHandle(thread);
+        }
+        LogLine("bots: set %d v %d%s", a, b, notes.c_str());
+        char out[96];
+        sprintf_s(out, "bots set %d v %d", a, b);
+        return out + notes;
+    }
+    if (s == "off")
+    {
+        g_botsOn = false;
+        BotsApply(false);                                 // the round's own fill and spawn values back
+        LogLine("bots: off");
+        return "bots off - the match's own bot settings are back";
+    }
+    if (s == "status" || s.empty())
+        return BotsStatus();
+    return "usage: bots set <team1> <team2> | bots off | bots status";
+}
+
+// Big battles switched on in the Bots tab (settings.ini bigBattles=1): the cap must be in before the first match's
+// player manager is built, so it goes in as soon as the code is unpacked - polled every 20 ms for up to 2 minutes.
+static DWORD WINAPI BigBattlesBootThread(LPVOID)
+{
+    UiSettings s;
+    LoadSettings(SettingsPath(), &s);
+    if (!s.bigBattles)
+        return 0;
+    const int cap = CapFor(s.teamSize1, s.teamSize2);
+    // Not at the very start of boot: patched 0.5 s after an early attach, the engine stalled before its first init
+    // step and the game exited (run task7_r1). The client game context exists ~4 s in, the first match's player
+    // manager ~9 s at the earliest - patch in between.
+    for (int i = 0; i < 6000; ++i)
+    {
+        uintptr_t clientContext = 0;
+        if (SafeRead(g_base + kClientGameContextRva, &clientContext) && clientContext != 0)
+            break;
+        Sleep(20);
+    }
+    for (int i = 0; i < 6000 && (g_capValue == 0 || !g_poolGrowOn); ++i)
+    {
+        if (g_capValue == 0)
+            CapFix(cap);
+        if (!g_poolGrowOn && !g_poolFixOn)
+            PoolGrowInstall();
+        if (g_capValue == 0 || !g_poolGrowOn)
+            Sleep(20);
+    }
+    char line[48];
+    sprintf_s(line, "set %d %d", s.teamSize1, s.teamSize2);
+    LogLine("bots: big battles on at startup (cap %ld, pool %s) - %s", g_capValue, g_poolGrowOn ? "on" : "off",
+            BotsCommand(line).c_str());
+    return 0;
+}
+
 static uintptr_t ThunkDestination(uintptr_t thunk)
 {
     unsigned char bytes[5] = {};
@@ -12185,8 +12542,9 @@ static std::string HandleCommand(const std::string& line)
         const std::string s(sub);
         if (s == "do")                           // ui do <control> <value>: what that widget does
         {
-            char value[64] = {};
-            sscanf_s(rest, "%*s %*s %63s", value, static_cast<unsigned>(sizeof(value)));
+            const char* value = strstr(rest, arg) + strlen(arg);       // the rest of the line: "64 64", "levelname"
+            while (*value == ' ')
+                ++value;
             return Menu_Do(arg, value);
         }
         if (s == "open") g_menu.Open();
@@ -14010,6 +14368,14 @@ static std::string HandleCommand(const std::string& line)
         }
         return PoolGrowInstall();
     }
+
+    // capfix <n> - the player cap for matches started from now on (2..250); see CapFix.
+    if (command == "capfix")
+        return CapFix(atoi(rest));
+
+    // bots set <team1> <team2> | bots off | bots status - big bot battles, up to 64 v 64; see BotsCommand.
+    if (command == "bots")
+        return BotsCommand(rest);
 
     // exitwatch - log the stack of whoever calls NtTerminateProcess (see ExitWatchInstall).
     if (command == "exitwatch")
@@ -16578,7 +16944,10 @@ static DWORD WINAPI Startup(LPVOID)
     CreateThread(nullptr, 0, SelectionDrawThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LevelHoldThread, nullptr, 0, nullptr);
     if (g_size == kExpectedModuleSize)           // the menu's hooks are build-specific
+    {
         CreateThread(nullptr, 0, MenuBootThread, nullptr, 0, nullptr);
+        CreateThread(nullptr, 0, BigBattlesBootThread, nullptr, 0, nullptr);
+    }
 
     ServerThread(nullptr);
     return 0;

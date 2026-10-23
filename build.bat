@@ -37,7 +37,7 @@ if not exist "%OBJ%\dll" mkdir "%OBJ%\dll"
 if not exist "%OBJ%\test" mkdir "%OBJ%\test"
 
 REM UI logic with no game or ImGui dependency - unit-tested on its own.
-set UI_LOGIC="%ROOT%\src\ui\command_queue.cpp" "%ROOT%\src\ui\settings.cpp" "%ROOT%\src\ui\actions.cpp" "%ROOT%\src\ui\menu_state.cpp" "%ROOT%\src\ui\history.cpp"
+set UI_LOGIC="%ROOT%\src\ui\command_queue.cpp" "%ROOT%\src\ui\settings.cpp" "%ROOT%\src\ui\actions.cpp" "%ROOT%\src\ui\menu_state.cpp" "%ROOT%\src\ui\history.cpp" "%ROOT%\src\bots_logic.cpp"
 
 if /i "%~1"=="test" goto :test
 
@@ -50,7 +50,7 @@ cl /nologo /LD /O2 /MT /EHa /W3 /std:c++17 ^
    /Fe:"%OUT%\FrostyGameLink.dll" ^
    /Fo:"%OBJ%\dll\\" ^
    "%ROOT%\src\main.cpp" %UI_LOGIC% "%ROOT%\src\ui\menu.cpp" "%ROOT%\src\ui\style.cpp" ^
-   "%ROOT%\src\ui\tab_diagnostics.cpp" "%ROOT%\src\ui\tab_advanced.cpp" ^
+   "%ROOT%\src\ui\tab_diagnostics.cpp" "%ROOT%\src\ui\tab_advanced.cpp" "%ROOT%\src\ui\tab_bots.cpp" ^
    "%ROOT%\src\imgui\imgui.cpp" "%ROOT%\src\imgui\imgui_draw.cpp" "%ROOT%\src\imgui\imgui_widgets.cpp" ^
    "%ROOT%\src\imgui\imgui_impl_dx11.cpp" "%ROOT%\src\imgui\imgui_impl_win32.cpp" ^
    /link /DLL ws2_32.lib psapi.lib dbghelp.lib user32.lib d3dcompiler.lib gdi32.lib
