@@ -37,7 +37,7 @@ if not exist "%OBJ%\dll" mkdir "%OBJ%\dll"
 if not exist "%OBJ%\test" mkdir "%OBJ%\test"
 
 REM UI logic with no game or ImGui dependency - unit-tested on its own.
-set UI_LOGIC="%ROOT%\src\ui\command_queue.cpp"
+set UI_LOGIC="%ROOT%\src\ui\command_queue.cpp" "%ROOT%\src\ui\settings.cpp"
 
 if /i "%~1"=="test" goto :test
 
